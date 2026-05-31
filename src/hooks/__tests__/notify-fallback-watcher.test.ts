@@ -430,6 +430,10 @@ describe('notify-fallback watcher', () => {
     assert.match(source, /decoder\.write\(bytes\)/);
     assert.match(source, /const fileStat = await stat\(path\)\.catch\(\(\) => null\);\s*if \(!fileStat\)\s*continue;/);
     assert.match(source, /if \(currentSize < meta\.offset\) \{\s*meta\.offset = 0;\s*meta\.partial = '';/);
+    assert.match(source, /readScopedJsonIfExists\(stateDir, 'hud-state\.json', undefined, null, \{\}, cwd\)/);
+    assert.match(source, /readScopedJsonIfExists\(stateDir, 'auto-nudge-state\.json', undefined, null, \{\}, cwd\)/);
+    assert.match(source, /isDeepInterviewStateActive\(stateDir, undefined, cwd\)/);
+    assert.match(source, /isDeepInterviewInputLockActive\(stateDir, undefined, cwd\)/);
     assert.doesNotMatch(source, /const content = await readFile\(path, 'utf-8'\)[\s\S]*const delta = content\.slice\(meta\.offset\)/);
     assert.doesNotMatch(source, /stat\(path\)\.catch\(\(\) => \(\{ size: 0 \}\)\)/);
   });

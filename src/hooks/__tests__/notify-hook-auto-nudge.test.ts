@@ -6,6 +6,12 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildTmuxSessionName } from '../../cli/index.js';
+import {
+  isDeepInterviewInputLockActive,
+  isDeepInterviewStateActive,
+  resolveAutoNudgeSignature,
+  syncSkillStateFromTurn,
+} from '../../scripts/notify-hook/auto-nudge.js';
 
 const NOTIFY_HOOK_SCRIPT = new URL('../../../dist/scripts/notify-hook.js', import.meta.url);
 const DEEP_INTERVIEW_BLOCKED_APPROVAL_INPUTS = ['yes', 'y', 'proceed', 'continue', 'ok', 'sure', 'go ahead', 'next i should'];
@@ -212,6 +218,79 @@ function runNotifyHook(
 
 describe('notify-hook auto-nudge', () => {
 
+  it('does not use stale session metadata for implicit auto-nudge skill and HUD state', async () => {
+    await withTempWorkingDir(async (cwd) => {
+      const stateDir = join(cwd, '.omx', 'state');
+      const staleSessionId = 'sess-stale';
+      await mkdir(join(stateDir, 'sessions', staleSessionId), { recursive: true });
+      await writeJson(join(stateDir, 'session.json'), {
+        session_id: staleSessionId,
+        cwd: join(cwd, 'other-worktree'),
+      });
+      await writeJson(join(stateDir, 'sessions', staleSessionId, 'skill-active-state.json'), {
+        version: 1,
+        active: true,
+        skill: 'deep-interview',
+        phase: 'planning',
+        updated_at: '2026-05-31T00:00:00.000Z',
+      });
+      await writeJson(join(stateDir, 'sessions', staleSessionId, 'hud-state.json'), {
+        turn_count: 7,
+        last_turn_at: '2026-05-31T00:00:00.000Z',
+        last_agent_output: 'please approve',
+      });
+
+      const sync = await syncSkillStateFromTurn(stateDir, {
+        cwd,
+        'last-assistant-message': 'review complete',
+        input_messages: [],
+      }, { sessionId: '' });
+      const signature = await resolveAutoNudgeSignature(stateDir, {
+        cwd,
+        'thread-id': 'thread-current',
+        'turn-id': 'turn-current',
+      }, 'please approve', { sessionId: '' });
+
+      assert.equal(sync.skillState, null);
+      assert.equal(signature, 'payload:thread-current|turn-current|please approve');
+      const staleSkillState = JSON.parse(
+        await readFile(join(stateDir, 'sessions', staleSessionId, 'skill-active-state.json'), 'utf-8'),
+      ) as Record<string, unknown>;
+      assert.equal(staleSkillState.phase, 'planning');
+    });
+  });
+
+  it('does not map native aliases through stale session metadata for deep-interview gates', async () => {
+    await withTempWorkingDir(async (cwd) => {
+      const stateDir = join(cwd, '.omx', 'state');
+      const staleSessionId = 'omx-stale';
+      const nativeSessionId = 'codex-current';
+      await mkdir(join(stateDir, 'sessions', staleSessionId), { recursive: true });
+      await writeJson(join(stateDir, 'session.json'), {
+        session_id: staleSessionId,
+        native_session_id: nativeSessionId,
+        cwd: join(cwd, 'other-worktree'),
+      });
+      await writeJson(join(stateDir, 'sessions', staleSessionId, 'deep-interview-state.json'), {
+        active: true,
+      });
+      await writeJson(join(stateDir, 'sessions', staleSessionId, 'skill-active-state.json'), {
+        version: 1,
+        active: true,
+        skill: 'deep-interview',
+        phase: 'planning',
+        input_lock: {
+          kind: 'deep-interview-auto-approval',
+          active: true,
+          blocked_inputs: ['continue'],
+        },
+      });
+
+      assert.equal(await isDeepInterviewStateActive(stateDir, nativeSessionId, cwd), false);
+      assert.equal(await isDeepInterviewInputLockActive(stateDir, nativeSessionId, cwd), false);
+    });
+  });
+
   it('does not nudge immediately by default before a real stall window elapses', async () => {
     await withTempWorkingDir(async (cwd) => {
       const omxDir = join(cwd, '.omx');
@@ -221,6 +300,7 @@ describe('notify-hook auto-nudge', () => {
       const fakeBinDir = join(cwd, 'fake-bin');
       const tmuxLogPath = join(cwd, 'tmux.log');
 
+      await mkdir(omxDir, { recursive: true });
       await mkdir(logsDir, { recursive: true });
       await mkdir(stateDir, { recursive: true });
       await mkdir(codexHome, { recursive: true });
@@ -1190,6 +1270,47 @@ exit 0
     });
   });
 
+  it('does not scope unresolved team-worker auto-nudge through inherited OMX_SESSION_ID', async () => {
+    await withTempWorkingDir(async (cwd) => {
+      const workerStateRoot = join(cwd, 'leader-state-root');
+      const logsDir = join(cwd, '.omx', 'logs');
+      const inheritedSessionId = 'sess-inherited';
+      const codexHome = join(cwd, 'codex-home');
+      const fakeBinDir = join(cwd, 'fake-bin');
+      const tmuxLogPath = join(cwd, 'tmux.log');
+
+      await mkdir(logsDir, { recursive: true });
+      await mkdir(join(workerStateRoot, 'sessions', inheritedSessionId), { recursive: true });
+      await mkdir(codexHome, { recursive: true });
+      await mkdir(fakeBinDir, { recursive: true });
+
+      await writeJson(join(codexHome, '.omx-config.json'), {
+        autoNudge: { enabled: true, delaySec: 0, stallMs: 0 },
+      });
+
+      await writeFile(join(fakeBinDir, 'tmux'), buildFakeTmux(tmuxLogPath));
+      await chmod(join(fakeBinDir, 'tmux'), 0o755);
+
+      const result = runNotifyHook(cwd, fakeBinDir, codexHome, {
+        'last-assistant-message': 'I can continue with the worker follow-up from here.',
+      }, {
+        OMX_TEAM_WORKER: 'auto-nudge/worker-1',
+        OMX_TEAM_STATE_ROOT: workerStateRoot,
+        OMX_SESSION_ID: inheritedSessionId,
+      });
+      assert.equal(result.status, 0, `hook failed: ${result.stderr || result.stdout}`);
+
+      const tmuxLog = await readFile(tmuxLogPath, 'utf-8');
+      assert.match(tmuxLog, defaultAutoNudgePattern('%99'), 'unresolved worker path should still send the narrow auto-nudge');
+      assert.equal(existsSync(join(workerStateRoot, 'auto-nudge-state.json')), true, 'auto-nudge state should fall back to root scope');
+      assert.equal(
+        existsSync(join(workerStateRoot, 'sessions', inheritedSessionId, 'auto-nudge-state.json')),
+        false,
+        'inherited env session must not receive auto-nudge state without usable session metadata',
+      );
+    });
+  });
+
   it('still auto-nudges from the stored worker pane when TMUX_PANE is missing and the worker pane looks shell-degraded', async () => {
     await withTempWorkingDir(async (cwd) => {
       const workerStateRoot = join(cwd, 'leader-state-root');
@@ -2051,6 +2172,64 @@ exit 0
       assert.equal(autopilotState.active, false);
       assert.equal(autopilotState.current_phase, 'complete');
       assert.equal(autopilotState.completed_at, terminalCompletedAt);
+    });
+  });
+
+  it('ignores stale session metadata when checking autopilot terminal replay suppression', async () => {
+    await withTempWorkingDir(async (cwd) => {
+      const omxDir = join(cwd, '.omx');
+      const stateDir = join(omxDir, 'state');
+      const logsDir = join(omxDir, 'logs');
+      const codexHome = join(cwd, 'codex-home');
+      const fakeBinDir = join(cwd, 'fake-bin');
+      const staleSessionStateDir = join(stateDir, 'sessions', 'sess-stale');
+
+      await mkdir(logsDir, { recursive: true });
+      await mkdir(staleSessionStateDir, { recursive: true });
+      await mkdir(codexHome, { recursive: true });
+      await mkdir(fakeBinDir, { recursive: true });
+
+      await writeJson(join(codexHome, '.omx-config.json'), {
+        autoNudge: { enabled: true, delaySec: 0, stallMs: 0 },
+      });
+      await writeJson(join(stateDir, 'session.json'), {
+        session_id: 'sess-stale',
+        cwd: join(cwd, 'other-worktree'),
+      });
+      await writeFile(join(omxDir, 'managed'), '');
+      await writeJson(join(staleSessionStateDir, 'autopilot-state.json'), {
+        mode: 'autopilot',
+        active: false,
+        current_phase: 'complete',
+        completed_at: '2026-05-31T20:24:39.005Z',
+        thread_id: 'thread-autopilot-complete',
+        turn_id: 'turn-autopilot-complete',
+      });
+
+      await writeFile(join(fakeBinDir, 'tmux'), buildFakeTmux(join(cwd, 'tmux.log')));
+      await chmod(join(fakeBinDir, 'tmux'), 0o755);
+
+      const result = runNotifyHook(cwd, fakeBinDir, codexHome, {
+        type: 'agent-turn-complete',
+        'thread-id': 'thread-autopilot-complete',
+        'turn-id': 'turn-autopilot-complete',
+        'input-messages': ['$autopilot .omx/specs/fresh-task.md'],
+        'last-assistant-message': 'Autopilot complete. Stale terminal replay text from another worktree.',
+      }, {
+        OMX_TEST_UNMANAGED_SESSION: '1',
+      });
+      assert.equal(result.status, 0, `hook failed: ${result.stderr || result.stdout}`);
+
+      const staleAutopilotState = JSON.parse(
+        await readFile(join(staleSessionStateDir, 'autopilot-state.json'), 'utf-8'),
+      ) as { active: boolean; current_phase: string };
+      assert.equal(staleAutopilotState.active, false);
+      assert.equal(staleAutopilotState.current_phase, 'complete');
+      assert.equal(
+        existsSync(join(stateDir, 'skill-active-state.json')),
+        true,
+        'stale terminal state from another worktree must not suppress the fresh root activation',
+      );
     });
   });
 

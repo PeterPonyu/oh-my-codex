@@ -281,14 +281,35 @@ function readSessionIdFromEnvironment(env: NodeJS.ProcessEnv = process.env): str
     if (typeof candidate !== 'string') continue;
     const trimmed = candidate.trim();
     if (!trimmed) continue;
-    return validateSessionId(trimmed);
+    try {
+      const sessionId = validateSessionId(trimmed);
+      if (sessionId) return sessionId;
+    } catch {
+      continue;
+    }
   }
   return undefined;
 }
 
 function resolveCanonicalSessionId(candidate: string | undefined, metadata: ResolvedSessionMetadata | undefined): string | undefined {
   if (!candidate) return undefined;
-  return metadata?.nativeSessionAliases.includes(candidate) ? metadata.sessionId : candidate;
+  if (!metadata) return candidate;
+  if (candidate === metadata.sessionId) return metadata.sessionId;
+  return metadata.nativeSessionAliases.includes(candidate) ? metadata.sessionId : undefined;
+}
+
+function resolveImplicitSessionId(
+  envSessionId: string | undefined,
+  metadata: ResolvedSessionMetadata | undefined,
+): { sessionId?: string; source: SessionScopeSource } {
+  if (metadata?.sessionId) {
+    const envCanonical = resolveCanonicalSessionId(envSessionId, metadata);
+    if (envCanonical === metadata.sessionId && envSessionId && envSessionId !== metadata.sessionId) {
+      return { sessionId: metadata.sessionId, source: 'native-alias' };
+    }
+    return { sessionId: metadata.sessionId, source: 'session-json' };
+  }
+  return { source: 'root' };
 }
 
 async function readUsableSessionStateFromBaseStateDir(
@@ -348,9 +369,8 @@ export async function readCurrentSessionId(workingDirectory?: string): Promise<s
   const baseStateDir = getBaseStateDir(cwd);
   const envSessionId = readSessionIdFromEnvironment();
   const metadata = await readSessionMetadataFromBaseStateDir(cwd, baseStateDir);
-  if (envSessionId) return resolveCanonicalSessionId(envSessionId, metadata);
-
-  if (metadata?.sessionId) return metadata.sessionId;
+  const implicit = resolveImplicitSessionId(envSessionId, metadata);
+  if (implicit.sessionId) return implicit.sessionId;
 
   const localStateDir = join(cwd, '.omx', 'state');
   if (resolvePath(baseStateDir) !== resolvePath(localStateDir)) {
@@ -404,14 +424,13 @@ export async function resolveRuntimeStateScope(
   let source: SessionScopeSource = 'root';
 
   if (validatedExplicit) {
-    sessionId = metadata?.nativeSessionAliases.includes(validatedExplicit) ? metadata.sessionId : validatedExplicit;
-    source = metadata?.nativeSessionAliases.includes(validatedExplicit) ? 'native-alias' : 'explicit';
-  } else if (envSessionId) {
-    sessionId = metadata?.nativeSessionAliases.includes(envSessionId) ? metadata.sessionId : envSessionId;
-    source = metadata?.nativeSessionAliases.includes(envSessionId) ? 'native-alias' : 'env';
-  } else if (metadata?.sessionId) {
-    sessionId = metadata.sessionId;
-    source = 'session-json';
+    const canonicalExplicit = resolveCanonicalSessionId(validatedExplicit, metadata);
+    sessionId = canonicalExplicit ?? validatedExplicit;
+    source = canonicalExplicit && canonicalExplicit !== validatedExplicit ? 'native-alias' : 'explicit';
+  } else {
+    const implicit = resolveImplicitSessionId(envSessionId, metadata);
+    sessionId = implicit.sessionId;
+    source = implicit.source;
   }
 
   const stateDir = sessionId ? join(baseStateDir, 'sessions', sessionId) : baseStateDir;

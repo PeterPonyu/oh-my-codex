@@ -626,8 +626,10 @@ async function resolveActiveTeamState(): Promise<ActiveTeamResult> {
   let currentSessionIsLive = false;
   const session = await readSessionState(cwd);
   if (session?.session_id) {
-    currentSessionId = normalizeValidSessionId(session.session_id);
-    currentSessionIsLive = currentSessionId !== '' && !isSessionStale(session);
+    if (isSessionStateAuthoritativeForCwd(session, cwd)) {
+      currentSessionId = normalizeValidSessionId(session.session_id);
+      currentSessionIsLive = currentSessionId !== '' && !isSessionStale(session);
+    }
     if (currentSessionId && currentSessionIsLive) {
       candidateDirs.push(join(stateDir, 'sessions', currentSessionId));
     }
@@ -872,7 +874,7 @@ async function readRalphProgressGate(
     }
   }
 
-  const hudState = await readScopedJsonIfExists(stateDir, 'hud-state.json', undefined, null);
+  const hudState = await readScopedJsonIfExists(stateDir, 'hud-state.json', undefined, null, {}, cwd);
   if (!hudState || typeof hudState !== 'object') {
     return { allow: false, reason: 'progress_missing', progress_at: '', subagent_session_id: subagentSessionId };
   }
@@ -1369,18 +1371,18 @@ async function readJsonObject(path: string): Promise<Record<string, unknown> | n
 }
 
 async function readAutoNudgeCount(): Promise<number> {
-  const parsed = await readScopedJsonIfExists(stateDir, 'auto-nudge-state.json', undefined, null);
+  const parsed = await readScopedJsonIfExists(stateDir, 'auto-nudge-state.json', undefined, null, {}, cwd);
   return Math.max(0, Math.trunc(asNumber(parsed?.nudgeCount as string | number | undefined, 0)));
 }
 
 async function readAutoNudgeState(): Promise<Record<string, unknown> | null> {
-  return readScopedJsonIfExists(stateDir, 'auto-nudge-state.json', undefined, null);
+  return readScopedJsonIfExists(stateDir, 'auto-nudge-state.json', undefined, null, {}, cwd);
 }
 
 async function runFallbackAutoNudgeTick(): Promise<void> {
   const now = Date.now();
   const nowIso = new Date(now).toISOString();
-  const hudState = await readScopedJsonIfExists(stateDir, 'hud-state.json', undefined, null);
+  const hudState = await readScopedJsonIfExists(stateDir, 'hud-state.json', undefined, null, {}, cwd);
 
   lastFallbackAutoNudge = {
     ...lastFallbackAutoNudge,
@@ -1425,7 +1427,7 @@ async function runFallbackAutoNudgeTick(): Promise<void> {
     'turn-id': `stalled-turn-${turnCount}`,
     'input-messages': ['[notify-fallback] synthesized from stalled hud-state'],
     'last-assistant-message': lastMessage,
-  }, lastMessage);
+  }, lastMessage, { sessionId: '', cwd });
   const persistedAutoNudgeState = await readAutoNudgeState();
   const autoNudgeConfig = await loadAutoNudgeConfig();
   const semanticSignature = normalizeAutoNudgeSignatureText(lastMessage);
@@ -1894,8 +1896,8 @@ async function runDispatchDrainTick(): Promise<boolean> {
 
 async function shouldSuppressInteractiveFallbackTicks(): Promise<boolean> {
   const [deepInterviewStateActive, deepInterviewInputLockActive] = await Promise.all([
-    isDeepInterviewStateActive(stateDir, undefined),
-    isDeepInterviewInputLockActive(stateDir, undefined),
+    isDeepInterviewStateActive(stateDir, undefined, cwd),
+    isDeepInterviewInputLockActive(stateDir, undefined, cwd),
   ]);
   return deepInterviewStateActive || deepInterviewInputLockActive;
 }

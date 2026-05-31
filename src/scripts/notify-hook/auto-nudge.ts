@@ -28,7 +28,7 @@ import {
   resolveManagedCurrentPane,
   resolveManagedPaneFromAnchor,
   resolveManagedSessionPane,
-  resolveInvocationSessionId,
+  resolvePayloadSessionId,
   verifyManagedPaneTarget,
 } from './managed-tmux.js';
 
@@ -186,13 +186,13 @@ export function inferSkillPhaseFromText(text, currentPhase = 'planning') {
   return normalizeSkillPhase(currentPhase);
 }
 
-async function loadSkillActiveState(stateDir, sessionId) {
-  const raw = await readScopedJsonIfExists(stateDir, SKILL_ACTIVE_STATE_FILE, sessionId, null);
+async function loadSkillActiveState(stateDir, sessionId, cwd = '') {
+  const raw = await readScopedJsonIfExists(stateDir, SKILL_ACTIVE_STATE_FILE, sessionId, null, {}, cwd);
   return normalizeSkillActiveState(raw);
 }
 
-async function persistSkillActiveState(stateDir, sessionId, state) {
-  await writeScopedJson(stateDir, SKILL_ACTIVE_STATE_FILE, sessionId, state).catch(() => {});
+async function persistSkillActiveState(stateDir, sessionId, state, cwd = '') {
+  await writeScopedJson(stateDir, SKILL_ACTIVE_STATE_FILE, sessionId, state, cwd).catch(() => {});
 }
 
 function cloneSkillActiveState(state) {
@@ -210,11 +210,19 @@ function cloneSkillActiveState(state) {
   };
 }
 
-export async function syncSkillStateFromTurn(stateDir, payload) {
+function resolveWriteSessionId(payload, options = {}) {
+  if (Object.prototype.hasOwnProperty.call(options, 'sessionId')) {
+    return safeString(options.sessionId).trim();
+  }
+  return safeString(resolvePayloadSessionId(payload)).trim();
+}
+
+export async function syncSkillStateFromTurn(stateDir, payload, options = {}) {
   const lastMessage = safeString(payload['last-assistant-message'] || payload.last_assistant_message || '');
   const latestUserInput = latestUserInputFromPayload(payload);
-  const invocationSessionId = resolveInvocationSessionId(payload);
-  let skillState = await loadSkillActiveState(stateDir, invocationSessionId);
+  const invocationSessionId = resolveWriteSessionId(payload, options);
+  const cwd = safeString(options.cwd || payload?.cwd || '').trim();
+  let skillState = await loadSkillActiveState(stateDir, invocationSessionId, cwd);
   let releaseReason = null;
 
   if (!skillState) {
@@ -254,7 +262,7 @@ export async function syncSkillStateFromTurn(stateDir, payload) {
   if (releaseReason && isDeepInterviewAutoApprovalLocked(skillState)) {
     releaseDeepInterviewInputLock(skillState, releaseReason, nowIso);
   }
-  await persistSkillActiveState(stateDir, invocationSessionId, skillState);
+  await persistSkillActiveState(stateDir, invocationSessionId, skillState, cwd);
 
   if (skillState.skill === 'deep-interview' || previousSkillState?.skill === 'deep-interview') {
     await persistDeepInterviewModeState(stateDir, skillState, nowIso, previousSkillState, {
@@ -268,22 +276,21 @@ export async function syncSkillStateFromTurn(stateDir, payload) {
 }
 
 
-export async function isDeepInterviewStateActive(stateDir, sessionId) {
-  const modeState = typeof sessionId === 'string' && sessionId.trim()
-    ? await readScopedJsonIfExists(stateDir, 'deep-interview-state.json', sessionId, null)
-    : await readJsonIfExists(join(stateDir, 'deep-interview-state.json'), null);
+export async function isDeepInterviewStateActive(stateDir, sessionId, cwd = '') {
+  const modeState = await readScopedJsonIfExists(stateDir, 'deep-interview-state.json', sessionId, null, {}, cwd);
   return Boolean(modeState && modeState.active === true);
 }
 
-export async function isDeepInterviewInputLockActive(stateDir, sessionId) {
-  const skillState = await loadSkillActiveState(stateDir, sessionId);
+export async function isDeepInterviewInputLockActive(stateDir, sessionId, cwd = '') {
+  const skillState = await loadSkillActiveState(stateDir, sessionId, cwd);
   return isDeepInterviewAutoApprovalLocked(skillState);
 }
 
-export async function resolveAutoNudgeSignature(stateDir, payload, lastMessage = '') {
+export async function resolveAutoNudgeSignature(stateDir, payload, lastMessage = '', options = {}) {
   const normalizedMessage = normalizeAutoNudgeSignatureText(lastMessage);
-  const invocationSessionId = resolveInvocationSessionId(payload);
-  const hudState = await readScopedJsonIfExists(stateDir, 'hud-state.json', invocationSessionId, null);
+  const invocationSessionId = resolveWriteSessionId(payload, options);
+  const cwd = safeString(options.cwd || payload?.cwd || '').trim();
+  const hudState = await readScopedJsonIfExists(stateDir, 'hud-state.json', invocationSessionId, null, {}, cwd);
   const hudTurnAt = safeString(hudState?.last_turn_at).trim();
   const hudTurnCount = Number.isFinite(hudState?.turn_count) ? hudState.turn_count : null;
   const hudMessage = normalizeAutoNudgeSignatureText(hudState?.last_agent_output || hudState?.last_agent_message || '');
@@ -541,13 +548,13 @@ export async function capturePane(paneId, lines = 10) {
   }
 }
 
-export async function resolveNudgePaneTarget(stateDir: any, cwd = '', payload: any = undefined) {
+export async function resolveNudgePaneTarget(stateDir: any, cwd = '', payload: any = undefined, options: any = {}) {
   const allowTeamWorker = safeString(process.env.OMX_TEAM_WORKER || '').trim() !== '';
   const managedCurrentPane = await resolveManagedCurrentPane(cwd, payload, { allowTeamWorker });
   if (managedCurrentPane) return managedCurrentPane;
 
-  const invocationSessionId = resolveInvocationSessionId(payload);
-  const scopedDirs = await getScopedStateDirsForCurrentSession(stateDir, invocationSessionId).catch(() => []);
+  const invocationSessionId = resolveWriteSessionId(payload, options);
+  const scopedDirs = await getScopedStateDirsForCurrentSession(stateDir, invocationSessionId, {}, cwd).catch(() => []);
   for (const dir of scopedDirs) {
     const files = await readdir(dir).catch(() => []);
     for (const f of files) {
@@ -573,7 +580,7 @@ export async function resolveNudgePaneTarget(stateDir: any, cwd = '', payload: a
   return await resolveManagedSessionPane(cwd, payload);
 }
 
-export async function maybeAutoNudge({ cwd, stateDir, logsDir, payload }) {
+export async function maybeAutoNudge({ cwd, stateDir, logsDir, payload, sessionId = '' }) {
   const config = await loadAutoNudgeConfig();
   const effectiveResponse = resolveEffectiveAutoNudgeResponse(config.response);
   if (!config.enabled) return;
@@ -599,15 +606,16 @@ export async function maybeAutoNudge({ cwd, stateDir, logsDir, payload }) {
   }
 
   const lastMessage = safeString(payload['last-assistant-message'] || payload.last_assistant_message || '');
-  const { invocationSessionId, skillState, releaseReason } = await syncSkillStateFromTurn(stateDir, payload);
+  const writeSession = resolveWriteSessionId(payload, { sessionId });
+  const { invocationSessionId, skillState, releaseReason } = await syncSkillStateFromTurn(stateDir, payload, { sessionId: writeSession, cwd });
 
   try {
-    const nudgeStatePath = await getScopedStatePath(stateDir, 'auto-nudge-state.json', invocationSessionId);
-    let nudgeState = await readScopedJsonIfExists(stateDir, 'auto-nudge-state.json', invocationSessionId, null);
+    const nudgeStatePath = await getScopedStatePath(stateDir, 'auto-nudge-state.json', invocationSessionId, cwd);
+    let nudgeState = await readScopedJsonIfExists(stateDir, 'auto-nudge-state.json', invocationSessionId, null, {}, cwd);
     if (!nudgeState || typeof nudgeState !== 'object') {
       nudgeState = { nudgeCount: 0, lastNudgeAt: '', lastSignature: '', lastSemanticSignature: '' };
     }
-    const paneId = await resolveNudgePaneTarget(stateDir, cwd, payload);
+    const paneId = await resolveNudgePaneTarget(stateDir, cwd, payload, { sessionId: invocationSessionId });
 
     let detected = detectStallPattern(lastMessage, config.patterns, skillState?.phase);
     let source = 'payload';
@@ -623,7 +631,7 @@ export async function maybeAutoNudge({ cwd, stateDir, logsDir, payload }) {
     if (!detected || !paneId) return;
 
     const signatureSourceText = source === 'capture-pane' ? captured : lastMessage;
-    const signature = await resolveAutoNudgeSignature(stateDir, payload, signatureSourceText);
+    const signature = await resolveAutoNudgeSignature(stateDir, payload, signatureSourceText, { sessionId: invocationSessionId, cwd });
     const semanticSignature = normalizeAutoNudgeSignatureText(signatureSourceText);
 
     if (signature && safeString(nudgeState.lastSignature) === signature) {
@@ -752,7 +760,7 @@ export async function maybeAutoNudge({ cwd, stateDir, logsDir, payload }) {
   } finally {
     if (releaseReason && skillState && isDeepInterviewAutoApprovalLocked(skillState)) {
       releaseDeepInterviewInputLock(skillState, releaseReason, new Date().toISOString());
-      await persistSkillActiveState(stateDir, invocationSessionId, skillState).catch(() => {});
+      await persistSkillActiveState(stateDir, invocationSessionId, skillState, cwd).catch(() => {});
     }
   }
 }

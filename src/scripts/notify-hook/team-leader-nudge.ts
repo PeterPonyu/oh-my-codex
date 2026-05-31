@@ -224,16 +224,10 @@ async function syncScopedTeamStateFromPhase(teamStatePath, teamName, phaseSnapsh
   }
 }
 
-async function resolveCurrentSessionId(stateDir) {
-  const fromEnv = safeString(
-    process.env.OMX_SESSION_ID
-    || process.env.CODEX_SESSION_ID
-    || process.env.SESSION_ID
-    || '',
-  ).trim();
-  const envSessionId = normalizeValidSessionId(fromEnv);
-  if (envSessionId) return envSessionId;
-  return normalizeValidSessionId((await readUsableSessionState(resolve(stateDir, '..', '..')))?.session_id);
+async function resolveCurrentSessionId(stateDir, cwd = '') {
+  const usableSessionId = normalizeValidSessionId((await readUsableSessionState(cwd || resolve(stateDir, '..', '..')))?.session_id);
+  if (usableSessionId) return usableSessionId;
+  return '';
 }
 
 async function readWorkerStatusSnapshot(stateDir, teamName, workerName) {
@@ -571,15 +565,15 @@ export async function maybeNudgeTeamLeader({
   }
 
   const candidateTeamNames = new Set();
-  const currentSessionId = await resolveCurrentSessionId(stateDir);
+  const currentSessionId = await resolveCurrentSessionId(stateDir, cwd);
   const deepInterviewActive = currentSessionId
-    ? await isDeepInterviewStateActive(stateDir, currentSessionId).catch(() => false)
-    : await isDeepInterviewStateActive(stateDir, undefined).catch(() => false);
+    ? await isDeepInterviewStateActive(stateDir, currentSessionId, cwd).catch(() => false)
+    : await isDeepInterviewStateActive(stateDir, undefined, cwd).catch(() => false);
   if (deepInterviewActive) {
     return;
   }
   try {
-    const scopedDirs = await getScopedStateDirsForCurrentSession(stateDir);
+    const scopedDirs = await getScopedStateDirsForCurrentSession(stateDir, undefined, {}, cwd);
     const candidateStateDirs = [...new Set([...scopedDirs, stateDir])];
     for (const scopedDir of candidateStateDirs) {
       const teamStatePath = join(scopedDir, 'team-state.json');

@@ -2,6 +2,7 @@ import { existsSync } from 'fs';
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'fs/promises';
 import { dirname, join } from 'path';
 import { captureTmuxPaneFromEnv } from '../../state/mode-state-context.js';
+import { isSessionStateUsable, type SessionState } from '../../hooks/session.js';
 import { resolveCodexPane } from '../tmux-hook-engine.js';
 import { safeString } from './utils.js';
 
@@ -21,6 +22,7 @@ interface RalphSessionResumeParams {
   stateDir: string;
   payloadSessionId: string;
   payloadThreadId?: string;
+  cwd?: string;
   env?: NodeJS.ProcessEnv;
   hooks?: RalphSessionResumeHooks;
 }
@@ -210,23 +212,21 @@ async function markRalphStateAbandoned(
   });
 }
 
-function readSessionIdFromEnvironment(env: NodeJS.ProcessEnv = process.env): string {
-  const candidates = [env.OMX_SESSION_ID, env.CODEX_SESSION_ID, env.SESSION_ID];
-  for (const candidate of candidates) {
-    const sessionId = safeString(candidate).trim();
-    if (SESSION_ID_PATTERN.test(sessionId)) return sessionId;
-  }
-  return '';
-}
-
-async function readCurrentOmxSessionId(stateDir: string, env: NodeJS.ProcessEnv = process.env): Promise<string> {
-  const envSessionId = readSessionIdFromEnvironment(env);
-  if (envSessionId) return envSessionId;
-
+async function readCurrentOmxSessionId(
+  stateDir: string,
+  cwd = '',
+): Promise<string> {
   const session = await readJson(join(stateDir, 'session.json'));
-  if (!session || typeof session !== 'object') return '';
-  const sessionId = safeString(session?.session_id).trim();
-  return SESSION_ID_PATTERN.test(sessionId) ? sessionId : '';
+  const usableSession = session && typeof session === 'object'
+    && (!cwd || isSessionStateUsable(session as unknown as SessionState, cwd))
+    ? session
+    : null;
+  const sessionId = safeString(usableSession?.session_id).trim();
+  if (SESSION_ID_PATTERN.test(sessionId)) {
+    return sessionId;
+  }
+
+  return '';
 }
 
 function resolveResumePane(env: NodeJS.ProcessEnv = process.env): string {
@@ -291,13 +291,14 @@ export async function reconcileRalphSessionResume({
   stateDir,
   payloadSessionId,
   payloadThreadId = '',
+  cwd = '',
   env = process.env,
   hooks,
 }: RalphSessionResumeParams): Promise<RalphSessionResumeResult> {
   const lockedResult = await withRalphResumeLock(stateDir, async () => {
     await hooks?.afterLockAcquired?.();
 
-    const currentOmxSessionId = await readCurrentOmxSessionId(stateDir, env);
+    const currentOmxSessionId = await readCurrentOmxSessionId(stateDir, cwd);
     if (!currentOmxSessionId) {
       return {
         currentOmxSessionId: '',

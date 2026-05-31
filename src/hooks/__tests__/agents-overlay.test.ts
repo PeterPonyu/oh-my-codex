@@ -5,7 +5,7 @@
  * size cap enforcement, and graceful handling of missing state.
  */
 
-import { describe, it, before, after } from "node:test";
+import { describe, it, before, after, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, rm, mkdir, writeFile, readFile } from "fs/promises";
 import { existsSync } from "fs";
@@ -31,6 +31,30 @@ const RUNTIME_START = "<!-- OMX:RUNTIME:START -->";
 const RUNTIME_END = "<!-- OMX:RUNTIME:END -->";
 const WORKER_START = "<!-- OMX:TEAM:WORKER:START -->";
 const WORKER_END = "<!-- OMX:TEAM:WORKER:END -->";
+
+const isolatedEnvKeys = [
+  "OMX_ROOT",
+  "OMX_STATE_ROOT",
+  "OMX_TEAM_STATE_ROOT",
+  "OMX_SESSION_ID",
+  "CODEX_SESSION_ID",
+  "SESSION_ID",
+] as const;
+const originalEnv = Object.fromEntries(
+  isolatedEnvKeys.map((key) => [key, process.env[key]]),
+) as Record<(typeof isolatedEnvKeys)[number], string | undefined>;
+
+beforeEach(() => {
+  for (const key of isolatedEnvKeys) delete process.env[key];
+});
+
+afterEach(() => {
+  for (const key of isolatedEnvKeys) {
+    const value = originalEnv[key];
+    if (typeof value === "string") process.env[key] = value;
+    else delete process.env[key];
+  }
+});
 
 async function makeTempDir(): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "omx-overlay-test-"));
@@ -610,6 +634,39 @@ describe("resolveSessionOrchestrationMode", () => {
     } finally {
       if (typeof previousTeamStateRoot === "string") process.env.OMX_TEAM_STATE_ROOT = previousTeamStateRoot;
       else delete process.env.OMX_TEAM_STATE_ROOT;
+    }
+  });
+
+
+  it("maps native session aliases before reading active modes and orchestration", async () => {
+    const wd = await makeTempDir();
+    try {
+      const stateRoot = join(wd, ".omx", "state");
+      const sessionId = "omx-canonical";
+      const nativeSessionId = "codex-native";
+      const sessionDir = join(stateRoot, "sessions", sessionId);
+      await mkdir(sessionDir, { recursive: true });
+      await writeFile(
+        join(stateRoot, "session.json"),
+        JSON.stringify({ session_id: sessionId, native_session_id: nativeSessionId, cwd: wd }),
+      );
+      await writeFile(
+        join(sessionDir, "team-state.json"),
+        JSON.stringify({ active: true, current_phase: "running" }),
+      );
+      await writeFile(
+        join(sessionDir, "skill-active-state.json"),
+        JSON.stringify({ active: true, skill: "team", phase: "running", session_id: sessionId }),
+      );
+
+      assert.equal(await resolveSessionOrchestrationMode(wd, nativeSessionId), "team");
+      const overlay = await generateOverlay(wd, nativeSessionId);
+      assert.match(overlay, /\*\*Session:\*\* omx-canonical/);
+      assert.doesNotMatch(overlay.split("\n", 2)[0] || "", /codex-native/);
+      assert.match(overlay, /\*\*Active Modes:\*\*/);
+      assert.match(overlay, /- team: phase: running/);
+    } finally {
+      await rm(wd, { recursive: true, force: true });
     }
   });
 });

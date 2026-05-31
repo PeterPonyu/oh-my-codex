@@ -361,7 +361,7 @@ describe('state paths', () => {
     }
   });
 
-  it('prefers OMX_SESSION_ID over stale session.json when resolving current session id', async () => {
+  it('does not promote inherited OMX_SESSION_ID to current session when session metadata is stale', async () => {
     const wd = await mkRealTemp('omx-state-paths-');
     const previousSessionId = process.env.OMX_SESSION_ID;
     try {
@@ -374,7 +374,10 @@ describe('state paths', () => {
       }));
       process.env.OMX_SESSION_ID = 'sess-env';
 
-      assert.equal(await readCurrentSessionId(wd), 'sess-env');
+      assert.equal(await readCurrentSessionId(wd), undefined);
+      const scope = await resolveRuntimeStateScope(wd);
+      assert.equal(scope.sessionId, undefined);
+      assert.equal(scope.source, 'root');
     } finally {
       if (typeof previousSessionId === 'string') process.env.OMX_SESSION_ID = previousSessionId;
       else delete process.env.OMX_SESSION_ID;
@@ -435,14 +438,54 @@ describe('state paths', () => {
     }
   });
 
-  it('resolves OMX_SESSION_ID even before the session directory exists', async () => {
+  it('does not let inherited env session ids override usable session metadata', async () => {
+    const wd = await mkRealTemp('omx-state-paths-env-mismatch-');
+    try {
+      const stateDir = getBaseStateDir(wd);
+      await mkdir(join(stateDir, 'sessions', 'omx-current'), { recursive: true });
+      await mkdir(join(stateDir, 'sessions', 'omx-inherited'), { recursive: true });
+      await writeFile(join(stateDir, 'session.json'), JSON.stringify({
+        session_id: 'omx-current',
+        cwd: wd,
+      }));
+      process.env.OMX_SESSION_ID = 'omx-inherited';
+      process.env.SESSION_ID = 'generic-shell';
+
+      assert.equal(await readCurrentSessionId(wd), 'omx-current');
+      const scope = await resolveRuntimeStateScope(wd);
+      assert.equal(scope.sessionId, 'omx-current');
+      assert.equal(scope.source, 'session-json');
+    } finally {
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
+  it('treats malformed inherited env session ids as unset for shared scope resolution', async () => {
+    const wd = await mkRealTemp('omx-state-paths-bad-env-');
+    try {
+      await mkdir(getBaseStateDir(wd), { recursive: true });
+      process.env.OMX_SESSION_ID = '../foo';
+
+      assert.equal(await readCurrentSessionId(wd), undefined);
+      const scope = await resolveRuntimeStateScope(wd);
+      assert.equal(scope.sessionId, undefined);
+      assert.equal(scope.source, 'root');
+    } finally {
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
+  it('does not resolve OMX_SESSION_ID as current before usable session metadata exists', async () => {
     const wd = await mkRealTemp('omx-state-paths-');
     const previousSessionId = process.env.OMX_SESSION_ID;
     try {
       await mkdir(getBaseStateDir(wd), { recursive: true });
       process.env.OMX_SESSION_ID = 'sess-not-yet-materialized';
 
-      assert.equal(await readCurrentSessionId(wd), 'sess-not-yet-materialized');
+      assert.equal(await readCurrentSessionId(wd), undefined);
+      const scope = await resolveRuntimeStateScope(wd);
+      assert.equal(scope.sessionId, undefined);
+      assert.equal(scope.source, 'root');
     } finally {
       if (typeof previousSessionId === 'string') process.env.OMX_SESSION_ID = previousSessionId;
       else delete process.env.OMX_SESSION_ID;

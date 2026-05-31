@@ -19,7 +19,7 @@ import {
 } from './state-io.js';
 import { runProcess } from './process-runner.js';
 import { logTmuxHookEvent } from './log.js';
-import { resolveInvocationSessionId, resolveManagedCurrentPane, resolveManagedSessionContext, verifyManagedPaneTarget } from './managed-tmux.js';
+import { resolveInvocationSessionId, resolveManagedCurrentPane, resolveManagedSessionContext, resolvePayloadSessionId, verifyManagedPaneTarget } from './managed-tmux.js';
 import { evaluatePaneInjectionReadiness, mapPaneInjectionReadinessReason, sendPaneInput } from './team-tmux-guard.js';
 import { listActiveSkills, readVisibleSkillActiveStateForStateDir } from '../../state/skill-active.js';
 import {
@@ -99,14 +99,14 @@ async function resolveCanonicalPaneFromPaneTarget(paneTarget: any, expectedCwd: 
   return finalizeResolvedPane(healedPaneId, 'healed_hud_pane_target', expectedCwd);
 }
 
-async function resolvePreferredModePane(
+export async function resolvePreferredModePane(
   stateDir: string,
   allowedModes: string[],
-  options: { includeRootFallback?: boolean } = {},
+  options: { includeRootFallback?: boolean; cwd?: string } = {},
 ): Promise<{ mode: string; state: any; pane: string; stateDir: string } | null> {
   const dirs = await getScopedStateDirsForCurrentSession(stateDir, undefined, {
     includeRootFallback: options.includeRootFallback !== false,
-  }).catch(() => [stateDir]);
+  }, options.cwd).catch(() => [stateDir]);
   for (const dir of dirs) {
     for (const mode of allowedModes || []) {
       const path = join(dir, `${mode}-state.json`);
@@ -204,8 +204,8 @@ export async function readVisibleAllowedModes(
   sessionScoped: boolean;
 }> {
   const candidateSessionIds = [
-    await readCurrentSessionId(stateDir).catch(() => undefined),
-    resolveInvocationSessionId(payload),
+    await readCurrentSessionId(stateDir, cwd).catch(() => undefined),
+    resolvePayloadSessionId(payload),
   ]
     .map((value) => safeString(value).trim())
     .filter(Boolean);
@@ -487,7 +487,7 @@ export async function handleTmuxInjection({
   try {
     const scopedDirs = await getScopedStateDirsForCurrentSession(stateDir, undefined, {
       includeRootFallback: !canonicalModeState.canonicalPresent && !canonicalModeState.sessionScoped,
-    });
+    }, cwd);
     await scanActiveModeStateDirs(scopedDirs);
   } catch {
     // Non-fatal
@@ -498,7 +498,7 @@ export async function handleTmuxInjection({
     canonicalModeState.canonicalPresent
       ? (canonicalModeState.preferredMode ? [canonicalModeState.preferredMode] : [])
       : config.allowed_modes,
-    { includeRootFallback: !canonicalModeState.sessionScoped },
+    { includeRootFallback: !canonicalModeState.sessionScoped, cwd },
   ).catch(() => null);
   const mode = canonicalModeState.canonicalPresent
     ? canonicalModeState.preferredMode

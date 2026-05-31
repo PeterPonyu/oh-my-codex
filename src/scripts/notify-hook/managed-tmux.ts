@@ -49,10 +49,17 @@ export function buildExpectedManagedTmuxSessionName(cwd: string, sessionId: stri
   return name.length > 120 ? name.slice(0, 120) : name;
 }
 
-export function resolveInvocationSessionId(payload: any): string {
+export function resolvePayloadSessionId(payload: any): string {
   return safeString(
     payload?.session_id
     || payload?.['session-id']
+    || '',
+  ).trim();
+}
+
+export function resolveInvocationSessionId(payload: any): string {
+  return safeString(
+    resolvePayloadSessionId(payload)
     || process.env.OMX_SESSION_ID
     || process.env.CODEX_SESSION_ID
     || process.env.SESSION_ID

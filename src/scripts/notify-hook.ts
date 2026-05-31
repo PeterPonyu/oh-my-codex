@@ -307,6 +307,7 @@ async function hasTerminalAutopilotStateForNotifyTurn(
   stateDir: string,
   sessionId: string,
   payload: Record<string, unknown>,
+  cwd = '',
 ): Promise<boolean> {
   const state = await readScopedJsonIfExists(
     stateDir,
@@ -314,6 +315,7 @@ async function hasTerminalAutopilotStateForNotifyTurn(
     sessionId || undefined,
     null,
     { includeRootFallback: true },
+    cwd,
   );
   return isTerminalModeStateObject(state, 'autopilot')
     && terminalStateMatchesNotifyTurn(state as Record<string, unknown>, payload);
@@ -324,6 +326,7 @@ async function shouldSuppressAutopilotTerminalReplayActivation(
   payload: Record<string, unknown>,
   isAutopilotActivation: boolean,
   sessionId: string,
+  cwd = '',
 ): Promise<boolean> {
   if (!isTurnCompletePayload(payload) && !isNotifyFallbackTaskCompletePayload(payload)) return false;
   if (!isAutopilotActivation) return false;
@@ -331,7 +334,7 @@ async function shouldSuppressAutopilotTerminalReplayActivation(
   const lastAssistantMessage = safeString(payload['last-assistant-message'] || payload.last_assistant_message || '');
   if (!looksLikeAutopilotTerminalHandoff(lastAssistantMessage) && !isNotifyFallbackTaskCompletePayload(payload)) return false;
 
-  return hasTerminalAutopilotStateForNotifyTurn(stateDir, sessionId, payload);
+  return hasTerminalAutopilotStateForNotifyTurn(stateDir, sessionId, payload, cwd);
 }
 
 function buildIdleNotificationFingerprint(payload: Record<string, unknown>): string {
@@ -403,7 +406,7 @@ async function main() {
   await mkdir(logsDir, { recursive: true }).catch(() => {});
   if (workerStateRootResolved) {
     await mkdir(stateDir, { recursive: true }).catch(() => {});
-    currentOmxSessionId = await readCurrentSessionId(stateDir).catch(() => '') || '';
+    currentOmxSessionId = await readCurrentSessionId(stateDir, cwd).catch(() => '') || '';
   }
 
   // Turn-level dedupe prevents double-processing when native notify and fallback
@@ -417,9 +420,9 @@ async function main() {
       const eventType = safeString(payload.type || 'agent-turn-complete');
       const key = `${threadId || 'no-thread'}|${turnId}|${eventType}`;
       const dedupeSessionId = getEffectiveSessionId();
-      const dedupeStatePath = await getScopedStatePath(stateDir, 'notify-hook-state.json', dedupeSessionId);
+      const dedupeStatePath = await getScopedStatePath(stateDir, 'notify-hook-state.json', dedupeSessionId, cwd);
       const dedupeState = normalizeNotifyState(
-        await readScopedJsonIfExists(stateDir, 'notify-hook-state.json', dedupeSessionId, null),
+        await readScopedJsonIfExists(stateDir, 'notify-hook-state.json', dedupeSessionId, null, {}, cwd),
       );
       dedupeState.recent_turns = pruneRecentTurns(dedupeState.recent_turns, now);
       if (dedupeState.recent_turns[key]) {
@@ -503,7 +506,8 @@ async function main() {
     const autoNudgeStateDir = explicitWorkerStateRoot ? resolve(cwd, explicitWorkerStateRoot) : '';
     if (autoNudgeStateDir && existsSync(autoNudgeStateDir)) {
       try {
-        await maybeAutoNudge({ cwd, stateDir: autoNudgeStateDir, logsDir, payload });
+        const autoNudgeSessionId = await readCurrentSessionId(autoNudgeStateDir, cwd).catch(() => '') || '';
+        await maybeAutoNudge({ cwd, stateDir: autoNudgeStateDir, logsDir, payload, sessionId: autoNudgeSessionId });
       } catch {
         // Non-critical
       }
@@ -519,6 +523,7 @@ async function main() {
         stateDir,
         payloadSessionId,
         payloadThreadId,
+        cwd,
       });
       currentOmxSessionId = resumeResult.currentOmxSessionId;
       if (resumeResult.resumed || resumeResult.updatedCurrentOwner) {
@@ -549,7 +554,7 @@ async function main() {
   // GUARD: Skip when running inside a team worker to prevent state corruption
   if (!isTeamWorker) {
     try {
-      const scopedDirs = await getScopedStateDirsForCurrentSession(stateDir);
+      const scopedDirs = await getScopedStateDirsForCurrentSession(stateDir, getEffectiveSessionId(), {}, cwd);
       for (const scopedDir of scopedDirs) {
         const stateFiles = await readdir(scopedDir).catch(() => []);
         for (const f of stateFiles) {
@@ -681,11 +686,11 @@ async function main() {
   if (!isTeamWorker) {
     try {
       const scopedSessionId = getEffectiveSessionId();
-      const hudStatePath = await getScopedStatePath(stateDir, 'hud-state.json', scopedSessionId);
+      const hudStatePath = await getScopedStatePath(stateDir, 'hud-state.json', scopedSessionId, cwd);
       let hudState = await readScopedJsonIfExists(stateDir, 'hud-state.json', scopedSessionId, {
         last_turn_at: '',
         turn_count: 0,
-      });
+      }, {}, cwd);
       const nowIso = new Date().toISOString();
       hudState.last_turn_at = nowIso;
       (hudState as any).last_progress_at = nowIso;
@@ -724,6 +729,7 @@ async function main() {
         payload,
         isAutopilotActivation,
         activationSessionId,
+        cwd,
       );
       if (!suppressTerminalReplay) {
         await recordSkillActivation({
@@ -741,16 +747,16 @@ async function main() {
   }
 
   try {
-    await syncSkillStateFromTurn(stateDir, payload);
+    await syncSkillStateFromTurn(stateDir, payload, { sessionId: getEffectiveSessionId(), cwd });
   } catch {
     // Non-fatal: lifecycle sync should not block the hook
   }
 
   const effectiveSessionId = getEffectiveSessionId();
   const deepInterviewStateActive = effectiveSessionId
-    ? await isDeepInterviewStateActive(stateDir, effectiveSessionId)
-    : await isDeepInterviewStateActive(stateDir, undefined);
-  const deepInterviewInputLockActive = await isDeepInterviewInputLockActive(stateDir, effectiveSessionId);
+    ? await isDeepInterviewStateActive(stateDir, effectiveSessionId, cwd)
+    : await isDeepInterviewStateActive(stateDir, undefined, cwd);
+  const deepInterviewInputLockActive = await isDeepInterviewInputLockActive(stateDir, effectiveSessionId, cwd);
 
   // 4.55. Notify leader when individual worker transitions to idle (worker session only)
   if (isTeamWorker && parsedTeamWorker && !deepInterviewStateActive) {
@@ -921,7 +927,7 @@ async function main() {
   //    Works for both leader and worker contexts.
   if (!deepInterviewStateActive || deepInterviewInputLockActive) {
     try {
-      await maybeAutoNudge({ cwd, stateDir, logsDir, payload });
+      await maybeAutoNudge({ cwd, stateDir, logsDir, payload, sessionId: getEffectiveSessionId() });
     } catch {
       // Non-critical
     }

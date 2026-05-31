@@ -443,6 +443,98 @@ describe('notify-hook Ralph session resume', () => {
     }
   });
 
+  it('prefers usable session metadata over a stale inherited Ralph resume env id', async () => {
+    const wd = await mkdtemp(join(tmpdir(), 'omx-notify-ralph-env-stale-'));
+    try {
+      const stateDir = join(wd, '.omx', 'state');
+      const currentOmxSessionId = 'sess-current';
+      const inheritedOmxSessionId = 'sess-inherited';
+      const currentSessionDir = join(stateDir, 'sessions', currentOmxSessionId);
+      const inheritedSessionDir = join(stateDir, 'sessions', inheritedOmxSessionId);
+      await writeJson(join(stateDir, 'session.json'), {
+        session_id: currentOmxSessionId,
+        cwd: wd,
+      });
+      await writeJson(join(currentSessionDir, 'ralph-state.json'), {
+        active: true,
+        iteration: 1,
+        max_iterations: 50,
+        current_phase: 'executing',
+        updated_at: new Date().toISOString(),
+        owner_omx_session_id: currentOmxSessionId,
+        owner_codex_session_id: 'codex-session-1',
+      });
+      await writeJson(join(inheritedSessionDir, 'ralph-state.json'), {
+        active: true,
+        iteration: 9,
+        max_iterations: 50,
+        current_phase: 'executing',
+        updated_at: new Date().toISOString(),
+        owner_omx_session_id: inheritedOmxSessionId,
+        owner_codex_session_id: 'codex-session-stale',
+      });
+
+      const result = await reconcileRalphSessionResume({
+        stateDir,
+        cwd: wd,
+        payloadSessionId: 'codex-session-1',
+        payloadThreadId: 'thread-current',
+        env: { OMX_SESSION_ID: inheritedOmxSessionId },
+      });
+
+      assert.equal(result.currentOmxSessionId, currentOmxSessionId);
+      assert.equal(result.resumed, false);
+      assert.equal(result.reason, 'current_ralph_active');
+      const inheritedState = JSON.parse(
+        await readFile(join(inheritedSessionDir, 'ralph-state.json'), 'utf-8'),
+      ) as Record<string, unknown>;
+      assert.equal(inheritedState.owner_omx_session_id, inheritedOmxSessionId);
+      assert.equal(inheritedState.owner_codex_session_id, 'codex-session-stale');
+    } finally {
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
+  it('does not use inherited OMX_SESSION_ID as current Ralph session when metadata is absent', async () => {
+    const wd = await mkdtemp(join(tmpdir(), 'omx-notify-ralph-env-no-session-json-'));
+    try {
+      const stateDir = join(wd, '.omx', 'state');
+      const inheritedOmxSessionId = 'sess-inherited';
+      const inheritedSessionDir = join(stateDir, 'sessions', inheritedOmxSessionId);
+      await writeJson(join(inheritedSessionDir, 'ralph-state.json'), {
+        active: true,
+        iteration: 9,
+        max_iterations: 50,
+        current_phase: 'executing',
+        updated_at: new Date().toISOString(),
+        owner_omx_session_id: inheritedOmxSessionId,
+        owner_codex_session_id: 'codex-session-stale',
+      });
+
+      const result = await reconcileRalphSessionResume({
+        stateDir,
+        cwd: wd,
+        payloadSessionId: 'codex-session-1',
+        payloadThreadId: 'thread-current',
+        env: { OMX_SESSION_ID: inheritedOmxSessionId },
+      });
+
+      assert.equal(result.currentOmxSessionId, '');
+      assert.equal(result.resumed, false);
+      assert.equal(result.updatedCurrentOwner, false);
+      assert.equal(result.reason, 'current_omx_session_missing');
+      const inheritedState = JSON.parse(
+        await readFile(join(inheritedSessionDir, 'ralph-state.json'), 'utf-8'),
+      ) as Record<string, unknown>;
+      assert.equal(inheritedState.active, true);
+      assert.equal(inheritedState.iteration, 9);
+      assert.equal(inheritedState.owner_omx_session_id, inheritedOmxSessionId);
+      assert.equal(inheritedState.owner_codex_session_id, 'codex-session-stale');
+    } finally {
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
   it('keeps active current-session Ralph state when fresh turn activity is newer than stale updated_at', async () => {
     const wd = await mkdtemp(join(tmpdir(), 'omx-notify-ralph-fresh-current-turn-'));
     try {

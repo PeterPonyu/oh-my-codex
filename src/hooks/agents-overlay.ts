@@ -32,6 +32,7 @@ import {
 import {
   getAuthoritativeActiveStateDirs,
   getAuthoritativeActiveStatePaths,
+  resolveRuntimeStateScope,
   getStateDir,
 } from "../mcp/state-paths.js";
 import { generateCodebaseMap } from "./codebase-map.js";
@@ -180,10 +181,10 @@ async function isRalphActive(
   cwd: string,
   sessionId?: string,
 ): Promise<boolean> {
-  const [baseStateDir] = await getAuthoritativeActiveStateDirs(cwd, sessionId);
+  const scope = await resolveRuntimeStateScope(cwd, sessionId);
   const canonicalState = await readVisibleSkillActiveStateForStateDir(
-    sessionId ? dirname(dirname(baseStateDir)) : baseStateDir,
-    sessionId,
+    scope.baseStateDir,
+    scope.sessionId,
   );
   return listActiveSkills(canonicalState ?? {}).some(
     (entry) => entry.skill === "ralph",
@@ -205,10 +206,10 @@ async function readActiveModes(
   cwd: string,
   sessionId?: string,
 ): Promise<string> {
-  const [baseStateDir] = await getAuthoritativeActiveStateDirs(cwd, sessionId);
+  const scope = await resolveRuntimeStateScope(cwd, sessionId);
   const canonicalState = await readVisibleSkillActiveStateForStateDir(
-    sessionId ? dirname(dirname(baseStateDir)) : baseStateDir,
-    sessionId,
+    scope.baseStateDir,
+    scope.sessionId,
   );
   const canonicalEntries = listActiveSkills(canonicalState ?? {}).sort((a, b) => a.skill.localeCompare(b.skill));
   const modes: string[] = [];
@@ -313,10 +314,6 @@ export async function resolveSessionOrchestrationMode(
 ): Promise<SessionOrchestrationMode> {
   if (activeSkill === "team") return "team";
   if (activeSkill) return "default";
-  if (sessionId && !existsSync(getStateDir(cwd, sessionId))) {
-    return "default";
-  }
-
   const scopedStateDirs = await getAuthoritativeActiveStateDirs(cwd, sessionId);
   for (const stateDir of scopedStateDirs) {
     const statePath = join(stateDir, SKILL_ACTIVE_STATE_FILE);
@@ -347,6 +344,8 @@ export async function generateOverlay(
   options: GenerateOverlayOptions = {},
 ): Promise<string> {
   const orchestrationMode = options.orchestrationMode ?? "default";
+  const runtimeScope = await resolveRuntimeStateScope(cwd, sessionId);
+  const canonicalSessionId = runtimeScope.sessionId ?? sessionId;
   const [
     activeModes,
     notepadPriority,
@@ -373,7 +372,7 @@ export async function generateOverlay(
   const sections: OverlaySection[] = [];
 
   // Session metadata (max 200 chars) - required
-  const sessionMeta = `**Session:** ${sessionId || "unknown"} | ${new Date().toISOString()}`;
+  const sessionMeta = `**Session:** ${canonicalSessionId || "unknown"} | ${new Date().toISOString()}`;
   sections.push({
     key: "session",
     text: truncate(sessionMeta, 200),
